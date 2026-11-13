@@ -26,6 +26,9 @@ for (let c = 0; c < COLOURS.length; c++) for (let o = 0; o < OBJECTS.length; o++
 
 const PER_PHONE = 4;
 const HALF = 72;                 // first set of names from [0, 72), renamed set from [72, 144): up to 18 players
+const FORGIVE_MS = 1000;         // a press on a button just hit or just timed out is a double tap or a late tap: no penalty
+const IDLE_AFTER = 4;            // this many of a phone's own instructions time out in a row → it seems idle
+const REST_MS = 20000;           // an idle phone gets no instructions and its buttons aren't named for this long
 const GRACE_MS = 300;
 const WRONG_LOCK_MS = 3000;      // a wrong press greys that phone's buttons for 3 s, so mashing loses points
 const NEXT_AFTER_HIT = 1000;     // instructor gets a new instruction 1 s after a success
@@ -66,6 +69,13 @@ module.exports = {
     const T = {};       // team → state
     const where = {};   // pid → team
     let renamedAt = null;
+    // Names are dealt by slot (seat position × 4 + button). Up to 18 players each set has its own half of the
+    // 144 names; a bigger team deals each set from all 144 (the second set offset by half) so names stay
+    // unique on a team of up to 36.
+    const slots = Math.max(1, ...ctx.teamsPlaying.map(t => ctx.teams[t].length)) * PER_PHONE;
+    const nameAt = (slot, renamed) => slots <= HALF
+      ? order[(renamed ? HALF : 0) + (slot % HALF)]
+      : order[(slot + (renamed ? HALF : 0)) % ALL_NAMES.length];
 
     for (const team of ctx.teamsPlaying) {
       const roster = ctx.teams[team];
@@ -78,6 +88,9 @@ module.exports = {
         nextAt: {},       // instructor pid → game time they may get the next one
         last: {},         // instructor pid → last button asked for (avoid asking twice running)
         lockUntil: {},    // holder pid → game time their buttons work again after a wrong press
+        forgive: {},      // buttonId → game time until which a press on it is forgiven (just hit / just timed out)
+        missed: {},       // instructor pid → own instructions timed out in a row
+        restUntil: {},    // pid → game time an idle phone rests until
         hits: 0, timeouts: 0, wrong: 0, seq: 0,
       };
       roster.forEach((p, i) => {
@@ -85,9 +98,8 @@ module.exports = {
         st.buttons[p.id] = [];
         for (let k = 0; k < PER_PHONE; k++) {
           const id = `b${i * PER_PHONE + k}`;
-          st.buttons[p.id].push({ id, n: order[(i * PER_PHONE + k) % HALF] });
+          st.buttons[p.id].push({ id, n: nameAt(i * PER_PHONE + k, false) });
           st.owner[id] = p.id;
-          // more than 18 players (never at a sabha) wraps the list; names stay unique per team up to 18
         }
       });
       T[team] = st;
@@ -96,15 +108,18 @@ module.exports = {
     const elapsed = () => ctx.now() - ctx.startsAt;
     const btn = (st, id) => { const pid = st.owner[id]; return pid ? st.buttons[pid].find(b => b.id === id) : null; };
 
+    const resting = (st, pid, now) => st.restUntil[pid] != null && now < st.restUntil[pid];
+    const active = (st, pid, now) => ctx.online(pid) && !resting(st, pid, now);
+
     function targeted(st) { const s = new Set(); for (const pid in st.instr) s.add(st.instr[pid].button); return s; }
 
     // give an instructor a new instruction, naming a free button on an online teammate's phone
     function issue(st, pid, now) {
-      if (!ctx.online(pid)) return false;
+      if (!active(st, pid, now)) return false;
       const taken = targeted(st);
       let cands = [];
       for (const other of st.ids) {
-        if (other === pid || !ctx.online(other)) continue;
+        if (other === pid || !active(st, other, now)) continue;
         for (const b of st.buttons[other]) if (!taken.has(b.id)) cands.push(b.id);
       }
       if (!cands.length) return false;
@@ -120,7 +135,7 @@ module.exports = {
 
     function fill(st, now) {
       for (const pid of st.ids) {
-        if (st.instr[pid] || !ctx.online(pid)) continue;
+        if (st.instr[pid] || !active(st, pid, now)) continue;
         if (st.nextAt[pid] != null && now < st.nextAt[pid]) continue;
         issue(st, pid, now);
       }
@@ -134,12 +149,23 @@ module.exports = {
       fill(st, now);
     }
 
+    // A phone whose own instructions keep timing out seems idle (on, but nobody playing): rest it so it stops
+    // getting instructions and teammates stop being asked for its buttons. Any press wakes it at once.
+    function rest(st, pid, now) {
+      st.restUntil[pid] = now + REST_MS;
+      st.missed[pid] = IDLE_AFTER - 1; // one more miss after the rest and it rests again
+      const p = ctx.player(pid);
+      ctx.warnHost(`${p ? p.name : 'A player'} (${TEAM_NAME[st.team]}) seems idle in Shout: their phone rests for ${REST_MS / 1000} s. Remove them if they've stopped playing.`);
+      reroute(st, now, ins => ins.holder === pid);
+      ctx.push(pid);
+    }
+
     function rename(now) {
       renamedAt = now;
       for (const team in T) {
         const st = T[team];
         st.ids.forEach((pid, i) => {
-          st.buttons[pid].forEach((b, k) => { b.n = order[HALF + ((i * PER_PHONE + k) % HALF)]; });
+          st.buttons[pid].forEach((b, k) => { b.n = nameAt(i * PER_PHONE + k, true); });
         });
         // every active instruction is re-issued for the new names, on the new (shortest) timer
         for (const pid of Object.keys(st.instr)) { delete st.instr[pid]; delete st.nextAt[pid]; }
@@ -160,6 +186,7 @@ module.exports = {
         buttons: st.buttons[pid].map(b => ({ id: b.id, label: label(b.n), colour: COLOURS[b.n.c].key, bg: COLOURS[b.n.c].bg, fg: COLOURS[b.n.c].fg, word1: COLOURS[b.n.c].name, word2: OBJECTS[b.n.o] })),
         instr: i ? { id: i.id, text: label(btn(st, i.button).n), deadline: i.deadline, timer: i.timer, issuedAt: i.issuedAt } : null,
         waiting: !i && (st.nextAt[pid] == null || ctx.now() >= st.nextAt[pid]),
+        resting: resting(st, pid, ctx.now()),
         renamedAt,
         lockUntil: st.lockUntil[pid] || 0,
         practice: !!ctx.practice,
@@ -181,11 +208,14 @@ module.exports = {
         if (!mine) return; // not one of this phone's buttons: ignore (stale tap or forged)
         const now = ctx.now();
         if (st.lockUntil[pid] && now < st.lockUntil[pid]) return; // locked after a wrong press
+        st.missed[pid] = 0; // pressing anything shows they're playing
+        if (resting(st, pid, now)) { delete st.restUntil[pid]; fill(st, now); ctx.pushTeam(team); return; } // "I'm here": no penalty
         let hitBy = null;
         for (const ip in st.instr) {
           const ins = st.instr[ip];
           if (ins.button === mine.id && now <= ins.deadline + GRACE_MS) { hitBy = ip; break; }
         }
+        if (!hitBy && st.forgive[mine.id] != null && now <= st.forgive[mine.id]) return; // double tap or a moment late
         if (!hitBy) {
           st.wrong++;
           ctx.award(team, [pid], 'wrong_press', -2, `pressed ${label(mine.n)}: nobody asked for it`);
@@ -200,6 +230,8 @@ module.exports = {
         const left = Math.max(0, ins.deadline - now);
         const bonus = Math.min(5, Math.max(1, Math.ceil(5 * left / ins.timer)));
         delete st.instr[hitBy];
+        st.forgive[mine.id] = now + FORGIVE_MS;
+        st.missed[hitBy] = 0;
         st.nextAt[hitBy] = now + NEXT_AFTER_HIT;
         st.hits++;
         const secs = ((now - ins.issuedAt) / 1000).toFixed(1);
@@ -217,13 +249,17 @@ module.exports = {
           const st = T[team];
           for (const pid of Object.keys(st.instr)) {
             const ins = st.instr[pid];
+            if (!ins) continue; // dropped by a reroute earlier in this loop
             if (now > ins.deadline + GRACE_MS) {
               delete st.instr[pid];
               st.timeouts++;
+              st.forgive[ins.button] = now + FORGIVE_MS;
               st.nextAt[pid] = now + NEXT_AFTER_TIMEOUT;
               ctx.track(pid, 'timeouts');
               ctx.fx(pid, { game: 'shout', type: 'timeout' });
               ctx.push(pid);
+              st.missed[pid] = (st.missed[pid] || 0) + 1;
+              if (st.missed[pid] >= IDLE_AFTER) rest(st, pid, now);
             }
           }
           fill(st, now); // issue() pushes each phone that gets a new instruction
@@ -257,7 +293,8 @@ module.exports = {
         for (const team in T) {
           const st = T[team];
           const online = st.ids.filter(id => ctx.online(id)).length;
-          lines.push(`${TEAM_NAME[team]}: ${st.hits} hits · ${st.timeouts} timed out · ${st.wrong} wrong presses · ${online}/${st.ids.length} online`);
+          const idle = st.ids.filter(id => resting(st, id, ctx.now())).map(id => (ctx.player(id) || {}).name);
+          lines.push(`${TEAM_NAME[team]}: ${st.hits} hits · ${st.timeouts} timed out · ${st.wrong} wrong presses · ${online}/${st.ids.length} online${idle.length ? ` · idle: ${idle.join(', ')}` : ''}`);
         }
         lines.push(ctx.practice ? 'Practice: 12 s per instruction, no points.' : `Instruction timer now ${timerFor(el) / 1000} s${renamedAt != null ? ' · controls changed at 2:00' : ' · controls change at 2:00'}`);
         return { lines };

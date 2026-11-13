@@ -17,6 +17,8 @@ function begin(opts = {}, { practice = false, mode } = {}) {
   return t;
 }
 const S = t => t.inst()._state;
+// advance while every phone counts as playing (so the idle rest never starts)
+function awake(t, ms) { for (let d = 0; d < ms; d += 1000) { for (const team in S(t)) S(t)[team].missed = {}; t.advance(Math.min(1000, ms - d)); } }
 const buttonsOf = (t, pid) => t.view(pid).buttons;
 function holderOf(t, team, buttonId) { return S(t)[team].owner[buttonId]; }
 
@@ -157,13 +159,13 @@ test('timer levels 12/9/7 s and the 2:00 rename', () => {
   assert.strictEqual(shout.timerFor(60000), 9000);
   assert.strictEqual(shout.timerFor(119999), 9000);
   assert.strictEqual(shout.timerFor(120000), 7000);
-  t.advance(61000 + 13000); // anything issued after 1:00 is 9 s
+  awake(t, 61000 + 13000); // anything issued after 1:00 is 9 s
   const timers = t.ids.red.map(pid => pending(t, pid)).filter(Boolean).map(i => i.timer);
   assert.ok(timers.every(x => x === 9000), 'timers after 1:13: ' + timers);
   const oldNames = buttonsOf(t, t.ids.red[0]).map(b => b.label);
   const oldIds = t.ids.red.map(pid => pending(t, pid)).map(i => i && i.id);
   t.clearFx();
-  t.advance(120000 - 74000 + 250);
+  awake(t, 120000 - 74000 + 250);
   assert.ok(t.view(t.ids.red[0]).renamedAt, 'renamed');
   const newNames = buttonsOf(t, t.ids.red[0]).map(b => b.label);
   assert.ok(newNames.every(l => !oldNames.includes(l)), 'all new names');
@@ -287,6 +289,56 @@ test('soak: full round with perfect and random players, invariants hold, scores 
   // round 2 then the game is over
   t.startRound(); t.finishRound();
   assert.strictEqual(t.room.phase, 'gameover');
+});
+
+test('a double tap after a hit, or a tap just after time-out, costs nothing', () => {
+  const t = begin({ red: 4, blue: 4 });
+  const ins = pending(t, t.ids.red[0]);
+  t.act(ins.holder, { type: 'press', button: ins.button });
+  t.act(ins.holder, { type: 'press', button: ins.button }); // second tap of a double tap
+  assert.ok(!t.room.events.some(e => e.type === 'wrong_press'), 'double tap forgiven');
+  assert.ok(!(t.view(ins.holder).lockUntil > t.room.now()), 'no lock');
+  const ins2 = pending(t, t.ids.red[1]);
+  t.advance(ins2.deadline - t.room.now() + 600); // timed out
+  assert.ok(!pending(t, t.ids.red[1]) || pending(t, t.ids.red[1]).id !== ins2.id);
+  if (!Object.values(S(t).red.instr).some(x => x.button === ins2.button)) {
+    t.act(ins2.holder, { type: 'press', button: ins2.button });
+    assert.ok(!t.room.events.some(e => e.type === 'wrong_press'), 'late tap forgiven');
+  }
+  t.advance(1500);
+  const free = buttonsOf(t, ins.holder).find(b => !Object.values(S(t).red.instr).some(x => x.button === b.id));
+  t.act(ins.holder, { type: 'press', button: free.id });
+  assert.strictEqual(t.room.events[t.room.events.length - 1].type, 'wrong_press', 'a real wrong press still costs');
+});
+
+test('an idle phone rests: no instructions to it, its buttons not named, the host is told; a tap wakes it', () => {
+  const t = begin({ red: 5, blue: 5 });
+  const idle = t.ids.red[0];
+  // everyone else answers whatever names their buttons; nobody shouts for the idle phone
+  const others = t.ids.red.slice(1);
+  let rested = false;
+  for (let s = 0; s < 80 && !rested; s++) {
+    for (const ip of others) { const ins = pending(t, ip); if (ins && ins.holder !== idle) t.act(ins.holder, { type: 'press', button: ins.button }); }
+    t.advance(1000);
+    rested = !!t.view(idle).resting;
+  }
+  assert.ok(rested, 'idle phone rests');
+  assert.ok(!pending(t, idle), 'no instruction while resting');
+  assert.ok(!Object.values(S(t).red.instr).some(x => x.holder === idle), 'its buttons are not named');
+  assert.ok(t.room.warnings.some(w => /seems idle/.test(w.text)));
+  const n0 = t.room.events.filter(e => e.type === 'wrong_press').length;
+  t.act(idle, { type: 'press', button: buttonsOf(t, idle)[0].id });
+  assert.strictEqual(t.room.events.filter(e => e.type === 'wrong_press').length, n0, 'waking tap is free');
+  assert.ok(!t.view(idle).resting);
+  assert.ok(pending(t, idle), 'gets an instruction again');
+});
+
+test('more than 18 players: button names stay unique, before and after the 2:00 rename', () => {
+  const t = begin({ red: 22, blue: 22 });
+  checkInvariants(t);
+  awake(t, 121000);
+  assert.ok(t.view(t.ids.red[0]).renamedAt);
+  checkInvariants(t);
 });
 
 console.log(`shout: ${n} tests passed`);

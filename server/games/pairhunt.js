@@ -18,6 +18,8 @@ const LOCK_MS = 3000;
 const LOCK_LONG_MS = 10000;    // after three wrong codes in a row
 const BONUS_FAST_MS = 15000;
 const BONUS_OK_MS = 30000;
+const STALE_MS = 60000;        // a pair not found by then is split and re-paired (a partner may be idle)
+const STALE_PAUSE_MS = 1500;
 const TEAMS = ['red', 'blue'];
 const TEAM_NAME = { red: 'Red', blue: 'Blue' };
 
@@ -170,6 +172,19 @@ function create(ctx) {
     ctx.pushTeam(t.team);
   }
 
+  // A pair that hasn't found each other in 60 s is split with no penalty: a partner whose phone is on but
+  // who isn't playing would otherwise strand the other for the rest of the round.
+  function splitStale(t) {
+    const now = ctx.now();
+    for (const g of [...t.groups.values()]) {
+      if (now - g.since < STALE_MS) continue;
+      for (const id of g.members) P[id].last = new Set(g.members.filter(o => o !== id));
+      ctx.award(t.team, g.members, 'pair_split', 0, `${symName(g.symbol).toLowerCase()} not found in ${STALE_MS / 1000}s: new partners`);
+      breakGroup(t, g, 'stale', STALE_PAUSE_MS);
+      ctx.pushTeam(t.team);
+    }
+  }
+
   function onCode(pid, raw) {
     const p = P[pid];
     if (!p || p.gid == null) return;
@@ -219,7 +234,7 @@ function create(ctx) {
     onAction(pid, a) {
       if (a.type === 'code') onCode(pid, a.code);
     },
-    onTick() { for (const team of TEAMS) pairPool(T[team]); },
+    onTick() { for (const team of TEAMS) { splitStale(T[team]); pairPool(T[team]); } },
     onPlayerOffline(pid) {
       const p = P[pid]; if (!p) return;
       const t = T[p.team];

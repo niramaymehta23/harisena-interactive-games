@@ -245,4 +245,21 @@ test('bot gives plausible actions', () => {
   assert.strictEqual(got.type, 'code'); assert.match(got.code, /^\d\d$/);
 });
 
+test('a pair not found in 60 s is split with no penalty and both get new partners', () => {
+  const t = live({ red: 4, blue: 4 });
+  const a = t.ids.red[0];
+  const g = groupOf(t, a);
+  const b = g.members.find(x => x !== a);
+  // the other red pair keeps finding each other; a and b never do (b is idle)
+  t.advance(59000);
+  assert.strictEqual(groupOf(t, a), g, 'still together before 60 s');
+  t.advance(1500);
+  assert.ok(t.room.events.some(e => e.type === 'pair_split' && e.points === 0 && e.playerIds.includes(a)));
+  assert.notStrictEqual(groupOf(t, a), g);
+  t.advance(3000);
+  const ga = groupOf(t, a);
+  assert.ok(ga, 'a has a new group');
+  assert.ok(!ga.members.includes(b), 'not paired with the idle partner again');
+});
+
 console.log(`pairhunt: ${n} tests passed`);

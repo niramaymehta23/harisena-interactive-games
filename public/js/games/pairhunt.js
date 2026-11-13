@@ -98,6 +98,7 @@ window.SabhaGames = window.SabhaGames || {};
         const msg = {
           matched: ['Matched!', 'New symbol coming…'],
           dropped: ['Your partner dropped out', 'New symbol coming…'],
+          stale: ['Time for a new partner', 'New symbol coming…'],
           waiting: ['Waiting for others…', 'You get a new symbol as soon as someone else is free.'],
           offline: ['Reconnecting…', ''],
         }[v.status] || ['Waiting for others…', ''];

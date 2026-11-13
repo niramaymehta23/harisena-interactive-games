@@ -34,7 +34,7 @@ SabhaGames.shout = {
     } else {
       S.instrId = null;
       kicker.textContent = '';
-      text.textContent = view.waiting ? 'Waiting for teammates…' : 'Next one coming…';
+      text.textContent = view.resting ? 'Are you still playing? Tap one of your buttons.' : view.waiting ? 'Waiting for teammates…' : 'Next one coming…';
     }
     S.instr = i;
     S.lockUntil = view.lockUntil || 0;
@@ -49,7 +49,10 @@ SabhaGames.shout = {
         const t = h('button.so-tile', {
           type: 'button', 'data-button': b.id, 'data-colour': b.colour, 'aria-label': b.label,
           style: `--tile:${b.bg};--tile-fg:${b.fg}`, // custom properties need the string form
-          onpointerdown: e => { e.preventDefault(); api.sound.tap(); api.send('press', { button: b.id }); t.classList.remove('down'); void t.offsetWidth; t.classList.add('down'); },
+          onpointerdown: e => {
+            e.preventDefault();
+            const now = Date.now(); if (now - (t._at || 0) < 300) return; t._at = now; // a double tap counts once
+            api.sound.tap(); api.send('press', { button: b.id }); t.classList.remove('down'); void t.offsetWidth; t.classList.add('down'); },
         }, h('span.w1', { text: b.word1 }), h('span.w2', { text: b.word2 }));
         S.tiles[b.id] = t;
         return t;

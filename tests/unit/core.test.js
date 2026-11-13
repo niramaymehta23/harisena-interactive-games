@@ -202,4 +202,17 @@ test('handover: two requests both wait; a phone that blinked can collect its ans
   assert.strictEqual(r2.pendingStatus('q1').creds.playerId, target.id);
 });
 
+test('Pair Hunt and Shout scores divide by players online during the round, not dead phones', () => {
+  const t = setup({ red: 4, blue: 4 });
+  t.offline(t.ids.red[3]);
+  t.startGame('pairhunt');
+  t.startRound();
+  t.finishRound();
+  const r = t.lastResult();
+  assert.strictEqual(r.teamSize.red, 4);
+  assert.strictEqual(r.counted.red, 3);
+  assert.strictEqual(r.counted.blue, 4);
+  assert.strictEqual(r.score.red, Math.round(r.raw.red * 10 / 3));
+});
+
 console.log(`core: ${n} tests passed`);

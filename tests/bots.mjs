@@ -212,7 +212,7 @@ for (const s of room.segments) {
     const sum = room.events.filter(e => e.segId === s.segId && e.team === t).reduce((a, e) => a + e.points, 0);
     if (sum !== s.raw[t]) problems.push(`${s.segId} ${t}: raw ${s.raw[t]} ≠ events ${sum}`);
     const mod = GAMES[s.game];
-    const want = s.practice ? 0 : mod.normalise ? Math.round(sum * 10 / Math.max(1, s.teamSize[t])) : sum;
+    const want = s.practice ? 0 : mod.normalise ? Math.round(sum * 10 / Math.max(1, (s.counted || s.teamSize)[t])) : sum;
     if (want !== s.score[t]) problems.push(`${s.segId} ${t}: score ${s.score[t]} ≠ ${want}`);
   }
 }

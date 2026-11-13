@@ -206,7 +206,10 @@ class Room {
       p.online = true;
       this.markHost();
       const seg = this.current && this.current.seg;
-      if (seg && seg.inst && this.phase === 'live' && seg.ids.has(pid)) this.safe(() => seg.inst.onPlayerOnline && seg.inst.onPlayerOnline(pid));
+      if (seg && seg.inst && this.phase === 'live' && seg.ids.has(pid)) {
+        seg.seen.add(pid);
+        this.safe(() => seg.inst.onPlayerOnline && seg.inst.onPlayerOnline(pid));
+      }
       this.markPlayer(pid);
       this.flush();
     }
@@ -340,6 +343,10 @@ class Room {
     const teams = desc.teams || TEAMS;
     const roster = {};
     for (const t of TEAMS) roster[t] = teams.includes(t) ? this.activePlayers(t).map(p => ({ id: p.id, name: p.name, seat: p.seat })) : [];
+    if (mod.needsEveryTeam) {
+      const nobody = teams.find(t => !roster[t].some(p => this.players[p.id].online));
+      if (nobody) throw new Error(`${TEAM_NAME[nobody]} has nobody online. Wait until their phones are back, then start.`);
+    }
     const segId = roundId + (teams.length === 1 ? '-' + teams[0] : '');
     const startsAt = this.now() + COUNTDOWN_MS;
     cur.seg = {
@@ -348,6 +355,7 @@ class Room {
       teamSize: { red: roster.red.length, blue: roster.blue.length },
       startsAt, endsAt: desc.ms ? startsAt + desc.ms : null, ms: desc.ms || null,
       inst: null, stats: {}, endReq: null, idx: cur.idx,
+      seen: new Set(), // roster players online at some point while the round was live: the score divides by these
     };
     for (const t of teams) {
       const online = roster[t].filter(p => this.players[p.id].online).length;
@@ -362,6 +370,7 @@ class Room {
     const seg = this.current.seg;
     const mod = GAMES[seg.game];
     seg.ctx = this.makeCtx(seg, mod);
+    for (const id of seg.ids) if (this.players[id] && this.players[id].online && !this.players[id].removed) seg.seen.add(id);
     this.phase = 'live';
     seg.inst = mod.create(seg.ctx);
     this.safe(() => seg.inst.start && seg.inst.start());
@@ -386,12 +395,14 @@ class Room {
       teams: seg.teams, teamSize: seg.teamSize, seed: seg.seed, endedBy: reason || 'time',
       startedAt: seg.startsAt, endedAt: this.now(),
       lines: res.lines || {}, stats: res.stats || {}, tiebreak: res.tiebreak || null, fun: res.fun || {},
-      raw: {}, score: {}, pstats: seg.practice ? {} : seg.stats,
+      raw: {}, score: {}, counted: {}, pstats: seg.practice ? {} : seg.stats,
     };
     for (const t of seg.teams) {
       const raw = this.events.filter(e => e.segId === seg.segId && e.team === t).reduce((s, e) => s + e.points, 0);
       result.raw[t] = raw;
-      result.score[t] = seg.practice ? 0 : (mod.normalise ? Math.round(raw * 10 / Math.max(1, seg.teamSize[t])) : raw);
+      // a phone that was off for the whole round doesn't dilute its team's score
+      result.counted[t] = seg.roster[t].filter(p => seg.seen.has(p.id)).length;
+      result.score[t] = seg.practice ? 0 : (mod.normalise ? Math.round(raw * 10 / Math.max(1, result.counted[t])) : raw);
     }
     this.segments.push(result);
     this.rebuildStats();

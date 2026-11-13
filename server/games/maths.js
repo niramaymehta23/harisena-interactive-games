@@ -113,6 +113,7 @@ module.exports = {
   championship: true,
   normalise: false,
   minPlayers: 2,
+  needsEveryTeam: true, // the room won't start a round while a team has nobody online
   rounds: () => [1, 2, 3].map(n => ({ n, label: `Round ${n}`, ms: CAP_MS })),
   generateChain, applyStep, stepText,
 
@@ -279,7 +280,8 @@ module.exports = {
           const t = T[team];
           if (t.doneAt != null || !t.players.length) continue;
           const cur = t.owner[t.pos];
-          if (!ctx.online(cur) && offlineSince[cur] != null && now - Math.max(offlineSince[cur], t.turnStart) >= OFFLINE_PASS_MS) {
+          // offline for 15 s, counted from when they dropped: someone gone for a while is passed at once
+          if (!ctx.online(cur) && offlineSince[cur] != null && now - offlineSince[cur] >= OFFLINE_PASS_MS) {
             passOn(t, now, 'offline 15 s');
           }
         }
@@ -287,7 +289,10 @@ module.exports = {
       onPlayerOffline(pid) { offlineSince[pid] = ctx.now(); const team = teamOfPid(pid); if (team) ctx.pushTeam(team); },
       onPlayerOnline(pid) { delete offlineSince[pid]; ctx.push(pid); },
       onHostCommand(d) {
-        if (d && d.skip && T[d.skip]) passOn(T[d.skip], ctx.now(), 'host skipped the seat');
+        const t = d && d.skip && T[d.skip];
+        if (!t || t.doneAt != null) return;
+        if (d.pid && t.owner[t.pos] !== d.pid) return; // a second tap on Skip for someone already passed over
+        passOn(t, ctx.now(), 'host skipped the seat');
       },
       view: viewFor,
       hostView() {
@@ -303,11 +308,22 @@ module.exports = {
           const cur = t.owner[t.pos];
           lines.push(`${TEAM_NAME[team]}: step ${t.pos + 1} of ${L} · ${name(cur)} (#${seat(cur)}) solving${ctx.online(cur) ? '' : ' · OFFLINE'}${t.wrong ? ` · ${t.wrong} wrong` : ''}${t.hints ? ` · ${t.hints} hint${t.hints > 1 ? 's' : ''}` : ''}`);
           if (t.checkers.length) lines.push(`${TEAM_NAME[team]} checkers: ${t.checkers.map(p => `${name(p)} (#${seat(p)})`).join(', ')}`);
-          buttons.push({ label: `Skip ${name(cur)} (${TEAM_NAME[team]})`, cmd: { skip: team }, confirm: `Pass ${name(cur)}'s step to the next seat?` });
+          buttons.push({ label: `Skip ${name(cur)} (${TEAM_NAME[team]})`, cmd: { skip: team, pid: cur }, confirm: `Pass ${name(cur)}'s step to the next seat?` });
         }
         return { lines, buttons };
       },
       end() {
+        const empty = ['red', 'blue'].filter(x => !T[x].players.length);
+        if (empty.length) {
+          // a team with nobody online can't race: no points either way, the host replays it
+          const lines = {}, stats = {};
+          for (const team of ['red', 'blue']) {
+            lines[team] = `Round void: ${TEAM_NAME[empty[0]]} had nobody online`;
+            stats[team] = { seconds: null, steps: T[team].pos, chainLength: L, wrongAnswers: T[team].wrongTotal, hints: T[team].hints };
+          }
+          ctx.warnHost(`Maths Chain round void: ${TEAM_NAME[empty[0]]} had nobody online. Tap Replay this round when they're back.`);
+          return { lines, stats, tiebreak: null };
+        }
         const done = ['red', 'blue'].map(x => T[x]).filter(t => t.doneAt != null)
           .sort((a, b) => teamTime(a) - teamTime(b) || a.finishOrder - b.finishOrder);
         const lines = {}, stats = {}, tiebreak = {};

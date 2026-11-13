@@ -232,17 +232,50 @@ test('fastestStep MVP stat and bot actions', () => {
   assert.strictEqual(maths.bot({ status: 'waiting' }, r), null);
 });
 
-test('a team with nobody online does not break the round', () => {
+test('a team with nobody online: the start is refused, and a round that lost them in the countdown is void', () => {
   const t = setup({ red: 3, blue: 2 });
   for (const b of t.ids.blue) t.offline(b);
-  t.startGame('maths'); t.startRound();
-  assert.strictEqual(dbg(t).L, 3);
-  for (let i = 0; i < 3; i++) solveStep(t, 'red');
-  t.advance(500);
-  assert.strictEqual(t.room.phase, 'time');
+  t.startGame('maths');
+  const r0 = t.hostTry({ cmd: 'start' });
+  assert.match(r0.error, /Blue has nobody online/);
+  assert.strictEqual(t.room.phase, 'intro');
+  // they come back, the host starts, and they all drop again during the countdown
+  for (const b of t.ids.blue) t.online(b);
+  t.host({ cmd: 'start' });
+  for (const b of t.ids.blue) { t.silent.add(b); t.room.setOffline(t.room.players[b]); }
+  t.advance(3000);
+  assert.strictEqual(t.room.phase, 'live');
+  t.host({ cmd: 'endRound' });
+  t.advance(3000);
   const r = t.lastResult();
-  assert.strictEqual(r.raw.red, 100);
-  assert.strictEqual(r.raw.blue, 0);
+  assert.deepStrictEqual(r.raw, { red: 0, blue: 0 }, 'no free 100 points');
+  assert.match(r.lines.red, /void/);
+  t.host({ cmd: 'replayRound' });
+});
+
+test('host Skip names the player: a second tap for the same player does nothing', () => {
+  const t = setup({ red: 4, blue: 4 });
+  t.startGame('maths'); t.startRound();
+  const T = dbg(t).T.red;
+  const first = T.owner[T.pos];
+  const btn = t.inst().hostView().buttons.find(b => b.cmd.skip === 'red');
+  t.host({ cmd: 'gameCmd', data: btn.cmd });
+  const second = T.owner[T.pos];
+  assert.notStrictEqual(second, first);
+  t.host({ cmd: 'gameCmd', data: btn.cmd }); // the same (stale) button again
+  assert.strictEqual(T.owner[T.pos], second, 'only one seat skipped');
+});
+
+test('a player who dropped long before their turn is passed over at once', () => {
+  const t = setup({ red: 4, blue: 4 });
+  t.startGame('maths'); t.startRound();
+  const T = dbg(t).T.red;
+  const third = T.owner[2];
+  t.offline(third); // 10.5 s
+  t.advance(16000); // counted offline for 16 s now
+  solveStep(t, 'red'); solveStep(t, 'red');
+  t.advance(500);
+  assert.notStrictEqual(T.owner[T.pos], third, 'passed without another 15 s wait');
 });
 
 console.log(`maths: ${n} tests passed`);

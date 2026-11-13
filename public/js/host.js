@@ -364,7 +364,8 @@ function resultBlock(s, seg) {
       statKeys.map(k => h('tr', null, h('td', { text: lab(k) }), teams.map(t => h('td', { text: fmtStat(seg.stats[t] && seg.stats[t][k]) })))),
       h('tr', null, h('td', { text: 'Raw points' }), teams.map(t => h('td', { text: String(seg.raw[t]) }))),
       !seg.practice ? h('tr', null, h('td', { text: 'Round score' }), teams.map(t => h('td.' + t[0], { text: String(seg.score[t]) }))) : null,
-      h('tr', null, h('td', { text: 'Players' }), teams.map(t => h('td', { text: String(seg.teamSize[t]) })))),
+      h('tr', null, h('td', { text: 'Players' }), teams.map(t => h('td', { text: String(seg.teamSize[t]) }))),
+      seg.counted && teams.some(t => seg.counted[t] !== seg.teamSize[t]) ? h('tr', null, h('td', { text: 'Played (score divides by this)' }), teams.map(t => h('td', { text: String(seg.counted[t]) }))) : null),
     !seg.practice && s.totals ? h('p.muted', { text: `${s.game.name} totals so far: Red ${s.totals.red}, Blue ${s.totals.blue}` }) : null,
     h('button.hbtn.small', { onclick: () => openAudit(seg.segId), text: 'How were these points earned?' }));
 }
