@@ -1,4 +1,4 @@
-// Host page: lobby, game control, round results, audit, Don't Say It counter, final.
+// Host page: lobby, game control, round results, audit and final.
 // The host never plays. Every button sends a host command; the server answers with fresh state.
 'use strict';
 
@@ -7,29 +7,9 @@ window.SabhaGames = window.SabhaGames || {};
 const H = { room: null, token: null, state: null, key: null, sheet: null, auditOpen: false };
 const happ = () => document.getElementById('app');
 
-// Don't Say It cards: 16 mirrored pairs (Team A word ↔ Team B word of matching difficulty)
-const DSI_CARDS = [
-  ['Cricket', 'Bat, Ball, Wicket, Sport', 'Football', 'Goal, Kick, Ball, Sport'],
-  ['Birthday', 'Cake, Candles, Party, Age', 'Wedding', 'Marriage, Bride, Groom, Party'],
-  ['Umbrella', 'Rain, Wet, Open, Cover', 'Sunglasses', 'Sun, Eyes, Wear, Summer'],
-  ['Doctor', 'Hospital, Sick, Medicine, Nurse', 'Teacher', 'School, Class, Student, Homework'],
-  ['Diwali', 'Diya, Light, Rangoli, Fireworks', 'Holi', 'Colours, Paint, Spring, Water'],
-  ['Elephant', 'Trunk, Big, Grey, Animal', 'Giraffe', 'Neck, Tall, Long, Animal'],
-  ['Pizza', 'Cheese, Italy, Slice, Base', 'Samosa', 'Fried, Triangle, Potato, Snack'],
-  ['Aeroplane', 'Fly, Pilot, Sky, Airport', 'Train', 'Track, Station, Platform, Railway'],
-  ['Mango', 'Fruit, Yellow, Summer, Juice', 'Banana', 'Fruit, Yellow, Peel, Monkey'],
-  ['Rainbow', 'Colours, Rain, Sky, Seven', 'Moon', 'Night, Sky, Round, Stars'],
-  ['Mirror', 'Reflection, Glass, Face, See', 'Camera', 'Photo, Click, Picture, Phone'],
-  ['Library', 'Books, Read, Quiet, Borrow', 'Kitchen', 'Cook, Food, Stove, Room'],
-  ['Garba', 'Dance, Navratri, Circle, Dandiya', 'Rangoli', 'Colours, Floor, Pattern, Diwali'],
-  ['Superhero', 'Cape, Powers, Fly, Save', 'Ghost', 'Scary, Haunted, Spirit, Halloween'],
-  ['Toothbrush', 'Teeth, Brush, Paste, Morning', 'Pillow', 'Bed, Sleep, Head, Soft'],
-  ['Snowman', 'Snow, Winter, Carrot, Cold', 'Sandcastle', 'Beach, Sand, Bucket, Sea'],
-];
-
 const PHASE_TEXT = {
   lobby: 'Lobby: players joining', ready: 'Teams locked: pick a game', intro: 'Ready to start', countdown: 'Starting…',
-  live: 'Round live', time: 'Time!', results: 'Round results', gameover: 'Game over', dsi: "Don't Say It", final: 'Final',
+  live: 'Round live', time: 'Time!', results: 'Round results', gameover: 'Game over', dsi: 'Pick a game', final: 'Final',
 };
 
 function toast(text) {
@@ -47,24 +27,56 @@ function hboot() {
   Net.connect();
   Net.socket.on('state', s => { H.state = s; Net.setClock(s.clock); hrender(); });
   Net.on('connect', () => { if (H.room) hhello(); });
+  Net.socket.on('ended', () => { forget(); toast('This session has ended.'); });
   const qs = new URLSearchParams(location.search);
   const saved = store.get(skey('host'));
   if (saved && (!qs.get('r') || qs.get('r').toUpperCase() === saved.room)) { H.room = saved.room; H.token = saved.token; }
   setInterval(htick, 200);
   hrender();
 }
+// drop the saved session on this phone and go back to the start screen
+function forget() {
+  store.del(skey('host')); H.room = null; H.token = null; H.state = null;
+  closeSheet(); history.replaceState(null, '', '/host' + (AS ? '?as=' + AS : '')); hrender();
+}
 async function hhello() {
   const r = await Net.call('host:hello', { room: H.room, hostToken: H.token });
-  if (r && r.error) { store.del(skey('host')); H.room = null; H.token = null; H.state = null; hrender(); toast('That session has ended. Start a new one.'); }
+  if (!r) toast('Cannot reach the server. Check the connection.');
+  else if (r.error) { forget(); toast('That session has ended. Start a new one.'); }
   else Wake.on();
 }
+function useSession(room, token) {
+  H.room = room; H.token = token;
+  store.set(skey('host'), { room, token });
+  history.replaceState(null, '', '/host?r=' + room + (AS ? '&as=' + AS : ''));
+  return hhello();
+}
+let creating = false;
 async function newSession() {
   Sound.ensure();
+  if (creating) return;
+  if (!Net.connected) return toast('Not connected to the server yet. Try again in a moment.');
+  creating = true;
   const r = await Net.call('host:create', null);
-  H.room = r.room; H.token = r.hostToken;
-  store.set(skey('host'), { room: r.room, token: r.hostToken });
-  history.replaceState(null, '', '/host?r=' + r.room);
-  await hhello();
+  creating = false;
+  if (!r || !r.room) return toast('Could not start a session. Try again.');
+  await useSession(r.room, r.hostToken);
+}
+async function takeOver(code, pin, err) {
+  Sound.ensure();
+  code = code.trim().toUpperCase();
+  if (!code || !pin.trim()) { err.textContent = 'Type the game code and the host PIN.'; return; }
+  const r = await Net.call('host:takeover', { room: code, pin: pin.trim() });
+  if (!r) { err.textContent = 'Cannot reach the server. Try again.'; return; }
+  if (r.error) { err.textContent = r.error; return; }
+  await useSession(r.room, r.hostToken);
+}
+async function endSession() {
+  if (!confirm(`End session ${H.room} for everyone? Every phone leaves the game and the scores are deleted. This cannot be undone.`)) return;
+  const r = await Net.call('host:end', null);
+  if (!r) return toast('Cannot reach the server. Try again.');
+  forget();
+  toast('Session ended.');
 }
 
 // ---------- render ----------
@@ -80,12 +92,14 @@ function hrender() {
   if (pressing && H.state && H.room) { deferred = true; return; }
   const s = H.state;
   if (!H.room || !s) {
-    if (H.key === 'start') return;
-    H.key = 'start';
-    return happ().replaceChildren(h('div.hsec', { style: { textAlign: 'center', paddingTop: '18vh' } },
+    if (H.key === 'start:' + H.room) return;
+    H.key = 'start:' + H.room;
+    return happ().replaceChildren(h('div.hsec', { style: { textAlign: 'center', paddingTop: '14vh' } },
       h('h1', { style: { fontFamily: 'var(--display)', fontWeight: 400, fontSize: '44px', margin: '0 0 10px' }, text: 'Sabha Games' }),
       h('p.muted', { text: 'This phone runs the games. The host does not play.' }),
-      H.room ? h('p', { text: 'Connecting to ' + H.room + '…' }) : h('button.hbtn.primary', { onclick: newSession, text: 'New Session' })));
+      H.room ? [h('p', { text: 'Connecting to ' + H.room + '…' }),
+        h('button.hbtn', { onclick: forget, text: 'Start a new session instead' })]
+        : [h('button.hbtn.primary', { onclick: newSession, text: 'New Session' }), takeoverForm()]));
   }
   // rebuild everything on each state (host screens are small); keep open sheets and typed text
   const keep = document.activeElement && document.activeElement.dataset && document.activeElement.dataset.keep;
@@ -98,12 +112,37 @@ function hrender() {
   if (H.sheet && H.sheetLive) H.sheet();
 }
 
+function takeoverForm() {
+  const qr = (new URLSearchParams(location.search).get('r') || '').toUpperCase();
+  const code = h('input.hin', { maxlength: 4, value: /^[A-Z]{4}$/.test(qr) ? qr : '', placeholder: 'Code', autocapitalize: 'characters', autocomplete: 'off', 'aria-label': 'Game code', style: { width: '100px' } });
+  const pin = h('input.hin', { maxlength: 4, inputmode: 'numeric', placeholder: 'PIN', autocomplete: 'off', 'aria-label': 'Host PIN', style: { width: '90px' } });
+  const err = h('p.muted');
+  const go = () => takeOver(code.value, pin.value, err);
+  pin.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+  return h('div.card', { style: { marginTop: '28px', textAlign: 'left' } },
+    h('h3', { style: { marginTop: 0 }, text: 'Take over a running session' }),
+    h('p.muted', { text: 'Host phone died or you switched phones? Type the game code and the host PIN shown on the old phone (under Session).' }),
+    h('div.hrow', null, code, pin, h('button.hbtn', { onclick: go, text: 'Take over' })), err);
+}
+
+function openSession() {
+  openSheet(() => [
+    h('h2', { text: 'Session ' + H.state.room }),
+    h('p', null, 'Host PIN: ', h('b', { style: { fontSize: '24px', letterSpacing: '3px' }, text: H.state.pin })),
+    h('p.muted', { text: `If this phone dies, open ${location.origin}/host on another phone and take over with code ${H.state.room} and this PIN. Write it down now.` }),
+    h('div.hcol', null,
+      h('button.hbtn.warn', { onclick: endSession, text: 'End session for everyone' }),
+      h('button.hbtn', { onclick: closeSheet, text: 'Close' })),
+  ]);
+}
+
 function bar(s) {
   return h('div.hbar', null,
     h('span.code', { text: s.room }),
     h('span.phase', { text: (s.paused ? 'PAUSED · ' : '') + (PHASE_TEXT[s.phase] || s.phase) }),
     h('button.hbtn.small', { onclick: openPlayers, text: `Players ${s.counts.red + s.counts.blue}` }),
-    h('button.hbtn.small', { onclick: openAudit, text: 'Audit' }));
+    h('button.hbtn.small', { onclick: openAudit, text: 'Audit' }),
+    h('button.hbtn.small', { onclick: openSession, text: 'Session' }));
 }
 
 function handovers(s) {
@@ -143,8 +182,12 @@ function teamLists(s, { tappable = true } = {}) {
         h('i.st' + (p.online ? '' : '.off')), h('span.nm', { text: p.name }), p.seat ? h('span.seatno', { text: '#' + p.seat }) : null)));
   };
   const unteamed = s.players.filter(p => !p.team && !p.removed && !p.waiting);
+  const removed = s.players.filter(p => p.removed);
   return h('div', null, h('div.teams2', null, col('red'), col('blue')),
-    unteamed.length ? h('p.muted', { text: 'Not picked yet: ' + unteamed.map(p => p.name).join(', ') }) : null);
+    unteamed.length ? h('p.muted', { text: 'Not picked yet: ' + unteamed.map(p => p.name).join(', ') }) : null,
+    tappable && removed.length ? h('div', null, h('h3', { text: 'Removed' }), h('div.hcol', null, removed.map(p => h('div.hrow', null,
+      h('span', { style: { flex: 1 }, text: `${p.name}${p.team ? ' (' + TEAM_NAME[p.team] + ')' : ''}` }),
+      h('button.hbtn.small', { onclick: () => cmd({ cmd: 'restore', pid: p.id }), text: 'Bring back' }))))) : null);
 }
 
 function playerSheet(p) {
@@ -197,7 +240,10 @@ const PHASES = {
       })),
     ];
   },
-  ready(s) { return [gamePicker(s), champBox(s)]; },
+  ready(s) {
+    return [gamePicker(s), champBox(s),
+      s.canUnlock ? h('div.hsec', null, h('button.hbtn.small', { onclick: () => { if (confirm('Unlock teams? Players can pick and switch teams again, and seat numbers are given out again when you lock.')) cmd({ cmd: 'unlock' }); }, text: 'Unlock teams (locked by mistake)' })) : null];
+  },
   intro(s) {
     const g = s.game;
     return [
@@ -233,12 +279,14 @@ const PHASES = {
   time(s) { return [h('div.hsec', null, h('div.hclock', { text: 'Time!' }))]; },
   results(s) {
     const last = s.results[s.results.length - 1];
+    const otherTurnPending = !last.practice && s.next && s.next.n === last.n && s.next.teams && s.next.teams.length === 1;
     return [
       resultBlock(s, last),
       h('div.hsec.hrow', null,
         s.next ? h('button.hbtn.primary', { onclick: () => cmd({ cmd: 'start' }), text: `Start ${roundLabel(s.next)}` }) : null,
-        h('button.hbtn', { onclick: () => { if (confirm('Finish this game now and skip the rounds left?')) cmd({ cmd: 'endGame' }); }, text: 'End game here' }),
+        h('button.hbtn', { disabled: otherTurnPending, onclick: () => { if (confirm('Finish this game now? Completed scores are kept; unplayed rounds are skipped.')) cmd({ cmd: 'endGame' }); }, text: 'Finish game and keep scores' }),
         h('button.hbtn.small', { onclick: () => { if (confirm('Throw away this round and play it again?')) cmd({ cmd: 'replayRound' }); }, text: 'Replay this round' })),
+      otherTurnPending ? h('p.muted', { text: `${TEAM_NAME[s.next.teams[0]]} still has a turn in this round. Finish both teams’ turns before ending the game.` }) : null,
       roundsList(s),
     ];
   },
@@ -249,12 +297,17 @@ const PHASES = {
         g ? h('div.say', { text: g.winner ? `"${TEAM_NAME[g.winner]} wins ${s.game.name}! ${TEAM_NAME[g.winner]} ${g.points[g.winner]}, ${TEAM_NAME[other(g.winner)]} ${g.points[other(g.winner)]}."` : `"${s.game.name} is a draw!"` }) : null,
         g ? h('p.muted', { text: `Game totals: Red ${g.totals.red}, Blue ${g.totals.blue} → championship points Red ${g.points.red}, Blue ${g.points.blue}` }) : null),
       s.results.length ? resultBlock(s, s.results[s.results.length - 1]) : null,
-      h('div.hsec.hrow', null, h('button.hbtn.small', { onclick: () => { if (confirm('Throw away the last round and play it again?')) cmd({ cmd: 'replayRound' }); }, text: 'Replay last round' })),
+      h('div.hsec.hrow', null,
+        h('button.hbtn.primary', { disabled: !(s.results || []).some(r => !r.practice) || Math.max(...s.game.rounds.map(r => r.n)) >= s.roundLimit, onclick: () => cmd({ cmd: 'addRound' }), text: 'Add another round' }),
+        h('button.hbtn.small', { onclick: () => { if (confirm('Throw away the last round and play it again?')) cmd({ cmd: 'replayRound' }); }, text: 'Replay last round' })),
+      h('p.muted', { text: 'Add another round keeps these scores. Replay last round replaces only the last round.' }),
+      roundsList(s),
       champBox(s),
       gamePicker(s),
     ];
   },
-  dsi(s) { return dsiPanel(s); },
+  // Old saved sessions may have stopped in the removed offline game's screen.
+  dsi(s) { return [gamePicker(s), champBox(s)]; },
   final(s) {
     const f = s.final;
     return [
@@ -263,7 +316,6 @@ const PHASES = {
         f.byTiebreak ? h('p.muted', { text: 'Level on points; decided by the faster combined Maths Chain time.' }) : null),
       h('div.hsec.card', null, h('h3', { text: 'Game winners' }),
         h('ul', null, f.games.map(g => h('li', { text: `${g.name}: ${g.winner ? TEAM_NAME[g.winner] : 'draw'} (Red ${g.points.red}, Blue ${g.points.blue})` })),
-          f.dsi ? h('li', { text: `Don't Say It: ${f.dsi.winner ? TEAM_NAME[f.dsi.winner] : 'draw'} (Red ${f.dsi.points.red}, Blue ${f.dsi.points.blue}; not in the championship)` }) : null,
           f.adjust.red || f.adjust.blue ? h('li', { text: `Manual adjustments: Red ${f.adjust.red}, Blue ${f.adjust.blue}` }) : null)),
       h('div.hsec.card', null, h('h3', { text: 'MVP shout-outs' }),
         f.mvps.length ? h('ul', null, f.mvps.map(m => h('li', { text: `${TEAM_NAME[m.team]} · ${m.label}: ${m.name} (${m.value})` }))) : h('p.muted', { text: 'No MVPs yet.' })),
@@ -275,9 +327,20 @@ const PHASES = {
 function roundLabel(r) { if (!r) return ''; return (r.practice ? 'practice round' : (r.label || 'Round ' + r.n)) + (r.teams && r.teams.length === 1 ? ` (${TEAM_NAME[r.teams[0]]})` : ''); }
 
 function roundsList(s) {
-  return h('div.hsec', null, h('h3', { text: 'Rounds' }), h('ol', { style: { margin: 0, paddingLeft: '22px' } },
+  const count = Math.max(...s.game.rounds.filter(r => !r.practice).map(r => r.n));
+  const minimum = Math.max(1, ...(s.results || []).filter(r => !r.practice).map(r => r.n));
+  return h('div.hsec', null, h('h3', { text: 'Rounds' }),
+    roundSelector('Planned rounds', count, value => cmd({ cmd: 'rounds', count: value }), minimum),
+    h('p.muted', { text: `Change this between rounds. Scores already earned are kept.${s.game.id === 'shout' && s.game.opts.mode === 'turn' ? ' Each round includes a Red turn and a Blue turn.' : ''}` }),
+    h('ol', { style: { margin: 0, paddingLeft: '22px' } },
     s.game.rounds.map((r, i) => h('li', { style: { fontWeight: i === s.game.idx ? 800 : 500, opacity: i < s.game.idx ? 0.55 : 1 } },
       `${roundLabel(r)}${r.ms ? ' · ' + fmtClock(r.ms) : ''}${i < s.game.idx ? ' ✓' : ''}`))));
+}
+
+function roundSelector(label, count, onChange, minimum = 1, caption = label) {
+  return h('label.hrow', null, h('span', { text: caption }),
+    h('select.hin', { 'aria-label': label, onchange: e => onChange(Number(e.target.value)) },
+      Array.from({ length: (H.state.roundLimit || 20) - minimum + 1 }, (_, i) => minimum + i).map(n => h('option', { value: n, selected: n === count, text: String(n) }))));
 }
 
 function genericHostView(v) {
@@ -314,18 +377,18 @@ function fmtStat(v) {
 function gamePicker(s) {
   return h('div.hsec', null, h('h2', { text: 'Games' }),
     h('div.games-list', null,
-      s.catalogue.map(g => h('div.gitem', null,
+      s.catalogue.map(g => h('div.gitem', { style: { flexWrap: 'wrap' } },
         h('span.gname', { text: g.name }),
-        h('span.gstat', { text: g.status === 'done' ? 'played ✓' : g.status === 'playing' ? 'unfinished' : `${g.rounds} round${g.rounds === 1 ? '' : 's'}` }),
+        g.status === 'new' ? null : h('span.gstat', { text: g.status === 'done' ? 'played ✓' : 'unfinished' }),
+        roundSelector(`${g.name} rounds`, g.rounds, count => cmd({ cmd: 'option', game: g.id, roundCount: count }), 1, 'Rounds'),
+        g.status === 'done' && s.championship.games.find(x => x.id === g.id) ? h('button.hbtn', { onclick: () => cmd({ cmd: 'addRound', game: g.id }), text: 'Add round' }) : null,
         h('button.hbtn' + (g.status === 'new' ? '.primary' : ''), {
           onclick: () => { if (g.status === 'new' || confirm(`Play ${g.name} again from the start? Its old scores are replaced.`)) cmd({ cmd: 'game', game: g.id }); },
-          text: g.status === 'new' ? 'Play' : 'Replay',
+          text: g.status === 'new' ? 'Play' : 'Restart game',
         }))),
       h('div.gitem', null, h('span.gname', { text: 'Shout It Out mode' }),
         h('button.hbtn.small' + (s.options.shoutMode === 'simultaneous' ? '.primary' : ''), { onclick: () => cmd({ cmd: 'option', shoutMode: 'simultaneous' }), text: 'Both at once' }),
         h('button.hbtn.small' + (s.options.shoutMode === 'turn' ? '.primary' : ''), { onclick: () => cmd({ cmd: 'option', shoutMode: 'turn' }), text: 'Turn-based' })),
-      h('div.gitem', null, h('span.gname', { text: "Don't Say It" }), h('span.gstat', { text: 'cards · not in the championship' }),
-        h('button.hbtn', { onclick: () => cmd({ cmd: 'dsi' }), text: 'Open' })),
       h('div.gitem', null, h('span.gname', { text: 'Final results' }),
         h('button.hbtn', { onclick: () => { if (confirm('Show the final results on every phone?')) cmd({ cmd: 'final' }); }, text: 'Show final' }))));
 }
@@ -340,37 +403,6 @@ function champBox(s) {
       c.games.map(g => h('tr', null, h('td', { text: g.name + (g.status === 'playing' ? ' (unfinished)' : '') }), h('td.r', { text: `${g.points.red} (${g.totals.red})` }), h('td.b', { text: `${g.points.blue} (${g.totals.blue})` }))),
       c.adjust.red || c.adjust.blue ? h('tr', null, h('td', { text: 'Manual adjustments' }), h('td.r', { text: String(c.adjust.red) }), h('td.b', { text: String(c.adjust.blue) })) : null),
     h('p.muted', { text: 'Points out of 100 per game; game totals in brackets.' }));
-}
-
-function dsiPanel(s) {
-  const d = s.dsi;
-  const t = d.turn;
-  const running = t && !t.over;
-  return [
-    h('div.hsec', null, h('h2', { text: "Don't Say It" }),
-      h('div.say', { text: '"Describe the word without saying the word or the banned words. The other team is watching you."' }),
-      h('p.muted', { text: 'Correct guess +1. Word, banned word, part of one or a gesture: −1 and discard. One skip per turn. 3 turns per team.' })),
-    h('div.hclock', { 'data-dsi': t ? t.endsAt : '' , text: running ? '' : '1:00' }),
-    h('p', { style: { textAlign: 'center', fontWeight: 800, fontSize: '20px' }, text: running ? `${TEAM_NAME[t.team]} describing (turn ${t.n} of 3)` : `Next: ${TEAM_NAME[d.next]} (turn ${d.turns[d.next] + 1})` }),
-    h('div.hsec.hrow', { style: { justifyContent: 'center' } },
-      running ? h('button.hbtn', { onclick: () => cmd({ cmd: 'dsiStop' }), text: 'Stop timer' }) :
-        [h('button.hbtn.primary', { onclick: () => cmd({ cmd: 'dsiStart', team: d.next }), text: `Start ${TEAM_NAME[d.next]}'s 60 s` }),
-          h('button.hbtn.small', { onclick: () => cmd({ cmd: 'dsiStart', team: other(d.next) }), text: `Start ${TEAM_NAME[other(d.next)]} instead` })]),
-    h('div.hsec.teams2', null, ['red', 'blue'].map(team => h('div.dsi-team.' + team, null,
-      h('div', { style: { fontWeight: 800 }, text: TEAM_NAME[team] }),
-      h('div.n', { text: String(d.points[team]) }),
-      h('div.hrow', null,
-        h('button.hbtn', { onclick: () => { Sound.bad(); cmd({ cmd: 'dsiPoint', team, delta: -1 }); }, text: '−1' }),
-        h('button.hbtn', { onclick: () => { Sound.good(); cmd({ cmd: 'dsiPoint', team, delta: 1 }); }, text: '+1' }))))),
-    h('div.hsec.hrow', null, h('button.hbtn.small', { onclick: () => cmd({ cmd: 'dsiUndo' }), text: 'Undo last tap' }),
-      h('button.hbtn', { onclick: () => cmd({ cmd: 'toReady' }), text: 'Back to games' }),
-      h('button.hbtn', { onclick: () => { if (confirm('Show the final results on every phone?')) cmd({ cmd: 'final' }); }, text: 'Show final' })),
-    h('details.hsec.card', null, h('summary', { style: { fontWeight: 800, minHeight: '32px' }, text: 'Cards (A and B piles)' }),
-      h('table.cards-tbl', null, h('tr', null, h('th', { text: '#' }), h('th', { text: 'Team A' }), h('th', { text: 'Team B' })),
-        DSI_CARDS.map((c, i) => h('tr', null, h('td', { text: String(i + 1) }),
-          h('td', null, h('b', { text: c[0] }), h('br'), h('span.muted', { text: c[1] })),
-          h('td', null, h('b', { text: c[2] }), h('br'), h('span.muted', { text: c[3] })))))),
-  ];
 }
 
 // ---------- audit ----------

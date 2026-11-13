@@ -67,7 +67,8 @@ const Net = {
   // game time: server time minus the time spent paused (frozen while paused)
   now() { const c = this.clock; return (c.at != null ? c.at : this.serverNow()) - c.total; },
   setClock(c) { if (c) this.clock = c; },
-  call(ev, data) { return new Promise(res => this.socket.emit(ev, data, res)); },
+  // resolves null if the server doesn't answer in time, so no screen waits forever
+  call(ev, data, ms = 8000) { return new Promise(res => this.socket.timeout(ms).emit(ev, data, (err, r) => res(err ? null : r))); },
 };
 
 // ---------- sound (synthesised; iPhones need one tap first, which the join button gives) ----------

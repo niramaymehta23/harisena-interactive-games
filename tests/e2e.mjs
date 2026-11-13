@@ -201,16 +201,9 @@ if (want('maths') && require('../server/room.js').GAMES.maths) {
   log('maths ok', JSON.stringify(mseg.raw));
 }
 
-// ---------- Don't Say It, audit, final ----------
+// ---------- audit and final (word guessing is played offline) ----------
 await cmd({ cmd: 'toReady' });
-await hostClick('Open');
-await waitText(phones[0], /Don't Say It/);
-await hostClick("Start Red's 60 s");
-await host.locator('.dsi-team.red').getByRole('button', { name: '+1' }).click();
-await host.locator('.dsi-team.blue').getByRole('button', { name: '−1' }).click();
-await waitText(phones[2], /Red 1[\s\S]*Blue -1/);
-await shot(host, '06-host-dsi');
-await shot(phones[0], '07-phone-dsi');
+assert(!(await text(host)).includes("Don't Say It"), 'offline word game is not in the app');
 await host.getByRole('button', { name: 'Audit' }).click();
 await host.waitForSelector('.sheet .events li');
 await shot(host, '08-host-audit');
@@ -220,7 +213,7 @@ for (const p of allPhones()) await waitText(p, /The champion is/);
 await shot(phones[0], '09-final-red');
 await shot(phones[2], '09-final-blue');
 await shot(host, '10-host-final');
-log('dsi, audit and final ok');
+log('audit and final ok');
 
 // every screen must be free of "undefined", "null" and "NaN"
 for (const p of [host, ...allPhones()]) { const t = await text(p); assert(!/\bundefined\b|\bNaN\b|\bnull\b/.test(t), 'junk on screen: ' + t.slice(0, 200)); }

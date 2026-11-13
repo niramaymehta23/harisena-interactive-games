@@ -9,6 +9,7 @@
 const crypto = require('crypto');
 const { rng, newSeed } = require('./rng');
 const scoring = require('./scoring');
+const { MAX_ROUNDS, DEFAULT_ROUNDS, roundCount, roundPlan } = require('./rounds');
 
 const GAMES = {};
 function registerGame(mod) { GAMES[mod.id] = mod; }
@@ -26,6 +27,8 @@ const NAME_MAX = 12;
 
 const uuid = () => crypto.randomUUID();
 const token = () => crypto.randomBytes(16).toString('hex');
+const makePin = () => String(crypto.randomInt(10000)).padStart(4, '0');
+const PIN_TRIES = 5, PIN_LOCK_MS = 60000;
 
 function makeCode(taken) {
   for (;;) {
@@ -43,6 +46,9 @@ class Room {
   constructor(code, opts = {}) {
     this.code = code;
     this.hostToken = opts.hostToken || token();
+    this.hostPin = opts.hostPin || makePin(); // lets another phone take over as host
+    this._pinFails = [];
+    this.ended = false;
     this.clock = opts.clock || Date.now;  // game time source (tests and the bot run speed it up)
     this.wall = opts.wall || this.clock;  // real time: heartbeats, spam guard, host push throttle
     this.out = opts.transport || nullTransport();
@@ -54,7 +60,7 @@ class Room {
     this.events = [];           // every point change (and a few zero-point notes), in order
     this.segments = [];         // finished live segments (one per round, two per turn-based round)
     this.games = {};            // gameId → {opts, status: 'playing'|'done', seeds: {roundId: seed}}
-    this.options = { shoutMode: 'simultaneous' };
+    this.options = { shoutMode: 'simultaneous', roundCounts: { ...DEFAULT_ROUNDS } };
     this.phase = 'lobby';       // lobby | ready | intro | countdown | live | time | results | gameover | dsi | final
     this.current = null;        // {game, opts, rounds, idx} plus, while a segment runs: seg
     this.pause = { total: 0, at: null };
@@ -168,6 +174,29 @@ class Room {
     return p;
   }
 
+  // A phone gives up its place. Before Lock Teams it simply disappears from the lobby; after,
+  // it stays on its team (scores and seats depend on it) and just goes offline.
+  leave(pid) {
+    const p = this.players[pid];
+    if (!p) return;
+    if (!this.locked) delete this.players[pid];
+    else this.setOffline(p);
+    this.markHost(); this.saveSoon(); this.flush();
+  }
+
+  // Another phone becomes host with the room PIN. Five wrong PINs lock it for a minute.
+  takeover(pin) {
+    const now = this.wall();
+    this._pinFails = this._pinFails.filter(t => now - t < PIN_LOCK_MS);
+    if (this._pinFails.length >= PIN_TRIES) return { error: 'Too many wrong PINs. Wait a minute and try again.' };
+    if (String(pin || '').trim() !== this.hostPin) { this._pinFails.push(now); return { error: 'Wrong PIN.' }; }
+    this._pinFails = [];
+    return { hostToken: this.hostToken };
+  }
+
+  // The host ended the session: nothing more is saved.
+  end() { this.ended = true; clearTimeout(this._saveTimer); this._saveTimer = null; }
+
   heartbeat(pid) {
     const p = this.players[pid];
     if (!p || p.removed) return;
@@ -252,7 +281,9 @@ class Room {
     if (!this.locked) throw new Error('Lock the teams first.');
     if (!['ready', 'gameover', 'dsi', 'final'].includes(this.phase)) throw new Error('Finish the current game first.');
     if (gameId === 'shout') opts = { mode: this.options.shoutMode, ...opts };
-    const rounds = mod.rounds(opts);
+    opts = { ...opts, roundCount: opts.roundCount === undefined ? this.options.roundCounts[gameId] : opts.roundCount };
+    const rounds = roundPlan(mod, opts);
+    opts.roundCount = Math.max(...rounds.filter(r => !r.practice).map(r => r.n));
     this.games[gameId] = { opts, status: 'playing', seeds: {} };
     // starting a game again replays it from scratch
     this.events = this.events.filter(e => e.game !== gameId || e.segId === 'manual');
@@ -262,6 +293,38 @@ class Room {
     this.final = null;
     this.phase = 'intro';
     this.markAll(); this.save();
+  }
+
+  setRoundCount(value) {
+    const cur = this.current;
+    if (!cur || !['intro', 'results', 'gameover'].includes(this.phase)) throw new Error('Change rounds between rounds.');
+    const count = roundCount(value);
+    const played = this.segments.filter(s => s.game === cur.game);
+    const minimum = Math.max(1, ...played.filter(s => !s.practice).map(s => s.n));
+    if (count < minimum) throw new Error(`Already played ${minimum} rounds. Earned scores are kept.`);
+    const opts = { ...cur.opts, roundCount: count };
+    const rounds = roundPlan(GAMES[cur.game], opts);
+    const next = rounds.findIndex(r => !played.some(s => s.n === r.n && s.practice === !!r.practice && s.teams.join() === (r.teams || TEAMS).join()));
+    cur.opts = opts; cur.rounds = rounds; cur.idx = next < 0 ? rounds.length : next;
+    this.games[cur.game].opts = opts;
+    this.games[cur.game].status = next < 0 ? 'done' : 'playing';
+    this.options.roundCounts[cur.game] = count;
+    this.final = null;
+    this.phase = next < 0 ? 'gameover' : next === 0 ? 'intro' : 'results';
+    this.markAll(); this.save();
+  }
+
+  addRound(gameId = this.current && this.current.game) {
+    if (!['ready', 'results', 'gameover', 'dsi', 'final'].includes(this.phase)) throw new Error('Add a round between rounds.');
+    const game = this.games[gameId];
+    const played = this.segments.filter(s => s.game === gameId && !s.practice);
+    if (!game || !played.length) throw new Error('Play a scored round first.');
+    const count = roundCount(Math.max(...played.map(s => s.n)) + 1);
+    // Reopen an earlier game without startGame(), which deliberately resets it.
+    const opts = { ...game.opts };
+    this.current = { game: gameId, opts, rounds: roundPlan(GAMES[gameId], opts), idx: 0, seg: null };
+    this.phase = 'gameover';
+    this.setRoundCount(count);
   }
 
   startSegment() {
@@ -446,7 +509,7 @@ class Room {
     if (this.phase === 'lobby' || this.phase === 'ready' || !p.team) return base;
     const cur = this.current;
     const mod = cur && GAMES[cur.game];
-    if (mod) base.game = { id: mod.id, name: mod.name, rule: mod.rule, rounds: cur.rounds.filter(r => !r.practice).length };
+    if (mod) base.game = { id: mod.id, name: mod.name, rule: mod.rule, rounds: Math.max(...cur.rounds.filter(r => !r.practice).map(r => r.n)) };
     if (['intro', 'countdown', 'live', 'time', 'results'].includes(this.phase) && cur) {
       const seg = cur.seg;
       const desc = seg ? cur.rounds[seg.idx] : cur.rounds[Math.min(cur.idx, cur.rounds.length - 1)];
@@ -492,13 +555,14 @@ class Room {
       id: p.id, name: p.name, team: p.team, seat: p.seat, online: p.online, waiting: p.waiting, removed: p.removed, joinedAt: p.joinedAt,
     }));
     const st = {
-      room: this.code, phase: this.phase, locked: this.locked, clock: this.clockInfo(), serverNow: this.clock(), paused: this.paused(),
+      room: this.code, pin: this.hostPin, phase: this.phase, locked: this.locked, clock: this.clockInfo(), serverNow: this.clock(), paused: this.paused(),
+      canUnlock: this.canUnlock(),
       players, counts: this.teamCounts(),
       handovers: this.handovers.map(h => { const t = this.players[h.targetId]; return { id: h.id, name: h.name, target: t ? `${t.name} (${this.label(t)})` : '?' }; }),
-      options: this.options,
+      options: this.options, roundLimit: MAX_ROUNDS,
       catalogue: GAME_ORDER.filter(id => GAMES[id]).map(id => ({
         id, name: GAMES[id].name, status: this.games[id] ? this.games[id].status : 'new',
-        rounds: GAMES[id].rounds(id === 'shout' ? { mode: this.options.shoutMode } : {}).filter(r => !r.practice).length,
+        rounds: this.options.roundCounts[id],
       })),
       championship: scoring.championship(this),
       warnings: this.warnings.slice(-5),
@@ -552,6 +616,8 @@ class Room {
 
   warn(text) { this.warnings.push({ t: this.clock(), text }); if (this.warnings.length > 20) this.warnings.shift(); this.markHost(); }
   touch() { this.touched = this.clock(); }
+  canUnlock() { return this.locked && this.phase === 'ready' && !Object.keys(this.games).length; }
+
   safe(fn) { try { fn(); } catch (e) { console.error(`[${this.code}] game error:`, e); this.warn('Game error: ' + (e.message || e)); } }
 
   // ---------- persistence ----------
@@ -571,7 +637,7 @@ class Room {
     }
     if (phase === 'time') phase = cur && cur.idx >= cur.rounds.length ? 'gameover' : 'results';
     return {
-      v: 1, code: this.code, hostToken: this.hostToken, created: this.created, touched: this.touched,
+      v: 1, code: this.code, hostToken: this.hostToken, hostPin: this.hostPin, created: this.created, touched: this.touched,
       players: Object.fromEntries(Object.entries(this.players).map(([id, p]) => [id, { ...p, online: false }])),
       locked: this.locked, events, segments: this.segments, games, options: this.options,
       phase, current: cur ? { game: cur.game, opts: cur.opts, idx: cur.idx } : null,
@@ -580,10 +646,10 @@ class Room {
     };
   }
   static fromJSON(d, opts) {
-    const r = new Room(d.code, { ...opts, hostToken: d.hostToken });
+    const r = new Room(d.code, { ...opts, hostToken: d.hostToken, hostPin: d.hostPin });
     Object.assign(r, {
       created: d.created, touched: d.touched, players: d.players, locked: d.locked, events: d.events, segments: d.segments,
-      games: d.games, options: d.options, phase: d.phase, stats: d.stats, dsi: d.dsi, adjustments: d.adjustments || [], final: d.final,
+      games: d.games, options: { ...r.options, ...d.options, roundCounts: { ...r.options.roundCounts, ...d.options?.roundCounts } }, phase: d.phase, stats: d.stats, dsi: d.dsi, adjustments: d.adjustments || [], final: d.final,
       handovers: d.handovers || [], answers: d.answers || {},
       _nextEvent: d.nextEvent || (d.events.length + 1),
     });
@@ -591,17 +657,18 @@ class Room {
     // a restart is not anyone's fault: give everyone a fresh 10 s before they count as offline
     for (const p of Object.values(r.players)) { p.online = false; p.lastSeen = r.wall(); }
     if (d.current && GAMES[d.current.game]) {
-      r.current = { game: d.current.game, opts: d.current.opts, idx: d.current.idx, rounds: GAMES[d.current.game].rounds(d.current.opts), seg: null };
+      r.current = { game: d.current.game, opts: d.current.opts, idx: d.current.idx, rounds: roundPlan(GAMES[d.current.game], d.current.opts), seg: null };
     }
     if (r.phase === 'final' && !r.final) r.phase = 'ready';
     return r;
   }
   save() {
     clearTimeout(this._saveTimer); this._saveTimer = null;
+    if (this.ended) return;
     if (this.saveFn) { try { this.saveFn(this); } catch (e) { console.error('save failed', e); } }
   }
   saveSoon() {
-    if (!this.saveFn || this._saveTimer) return;
+    if (!this.saveFn || this._saveTimer || this.ended) return;
     this._saveTimer = setTimeout(() => this.save(), 1000);
     if (this._saveTimer.unref) this._saveTimer.unref();
   }
@@ -640,6 +707,24 @@ const HOST_CMDS = {
     this.phase = 'ready';
     this.markAll(); this.save();
   },
+  // undo a removal: they come back on their old team (or wait for one) under their old seat
+  restore({ pid }) {
+    const p = this.players[pid];
+    if (!p || !p.removed) throw new Error('No such removed player.');
+    if (this.findByName(p.name)) p.name = this.uniqueName(p.name); // someone else took the name meanwhile
+    p.removed = false;
+    if (!p.team) p.waiting = this.locked;
+    if (this.locked) this.award(p.team, [pid], 'host_restore', 0, `Host brought back ${p.name}`, { segId: 'lobby', game: 'lobby' });
+    this.markPlayer(pid); this.markHost(); this.saveSoon();
+  },
+  // Locked by mistake: open the teams again, as long as no game has started.
+  unlock() {
+    if (!this.canUnlock()) throw new Error('Teams can only be unlocked before the first game.');
+    this.locked = false;
+    for (const p of Object.values(this.players)) { p.seat = null; p.waiting = false; }
+    this.phase = 'lobby';
+    this.markAll(); this.save();
+  },
   handover({ id, yes }) {
     const h = this.handovers.find(x => x.id === id);
     if (!h) return;
@@ -659,10 +744,19 @@ const HOST_CMDS = {
     this.out.req(h.id, 'joined', creds);
     this.save();
   },
-  option({ shoutMode }) {
+  option({ shoutMode, game, roundCount: value }) {
+    if (value !== undefined) {
+      if (['countdown', 'live', 'time'].includes(this.phase)) throw new Error('Change rounds between rounds.');
+      if (!GAMES[game]) throw new Error('No such game');
+      const count = roundCount(value);
+      this.options.roundCounts[game] = count;
+    }
     if (shoutMode && ['simultaneous', 'turn'].includes(shoutMode)) this.options.shoutMode = shoutMode;
+    this.markAll(); this.save();
   },
   game({ game, opts }) { this.startGame(game, opts || {}); },
+  rounds({ count }) { this.setRoundCount(count); },
+  addRound({ game }) { this.addRound(game); },
   start() { this.startSegment(); },
   pause() {
     if (!['countdown', 'live'].includes(this.phase) || this.paused()) return;
@@ -680,7 +774,19 @@ const HOST_CMDS = {
     // stop this game after the rounds played so far
     const cur = this.current;
     if (!cur) return;
+    const played = this.segments.filter(s => s.game === cur.game && !s.practice);
+    if (cur.game === 'shout' && cur.opts.mode === 'turn') {
+      const last = played[played.length - 1];
+      if (['countdown', 'live'].includes(this.phase) || last && !played.some(s => s.n === last.n && s.teams.includes('blue'))) throw new Error("Finish both teams' turns before ending this game.");
+    }
     if (['countdown', 'live'].includes(this.phase)) this.endSegment('host');
+    const completed = this.segments.filter(s => s.game === cur.game && !s.practice);
+    if (completed.length) {
+      cur.opts.roundCount = Math.max(...completed.map(s => s.n));
+      cur.rounds = roundPlan(GAMES[cur.game], cur.opts);
+      this.games[cur.game].opts = cur.opts;
+      this.options.roundCounts[cur.game] = cur.opts.roundCount;
+    }
     cur.idx = cur.rounds.length;
     this.games[cur.game].status = 'done';
     this.phase = this.phase === 'time' ? 'time' : 'gameover';
@@ -690,9 +796,10 @@ const HOST_CMDS = {
     // the server restarted or something went wrong: run the last finished round again
     const cur = this.current;
     if (!cur || !['results', 'gameover'].includes(this.phase)) throw new Error('Nothing to replay.');
-    const last = this.segments[this.segments.length - 1];
+    const index = this.segments.findLastIndex(s => s.game === cur.game);
+    const last = this.segments[index];
     if (!last || last.game !== cur.game) throw new Error('Nothing to replay.');
-    this.segments.pop();
+    this.segments.splice(index, 1);
     this.rebuildStats();
     this.events = this.events.filter(e => e.segId !== last.segId);
     // a fresh seed: everyone has already heard this round's answers shouted

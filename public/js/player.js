@@ -6,7 +6,7 @@ window.SabhaGames = window.SabhaGames || {};
 
 const P = {
   room: null, creds: null, state: null, screenKey: null, gameEl: null, gameSeg: null, pending: false,
-  replaced: false, lastPhase: null, hbTimer: null,
+  replaced: false, ended: false, lastPhase: null, hbTimer: null,
 };
 const app = () => document.getElementById('app');
 
@@ -27,7 +27,8 @@ function boot() {
   Net.connect();
   Net.socket.on('state', s => onState(s));
   Net.socket.on('fx', d => onFx(d));
-  Net.socket.on('replaced', () => { P.replaced = true; P.creds = null; render(); });
+  Net.socket.on('replaced', () => { P.replaced = true; if (P.room) store.del(credsKey(P.room)); P.creds = null; render(); });
+  Net.socket.on('ended', () => { forgetRoom(); P.ended = true; render(); });
   Net.socket.on('joined', c => { clearPending(); saveCreds(c); P.creds = c; hello(); });
   Net.on('connect', () => { if (P.creds) hello(); else if (P.pending) recheckPending(); renderConn(); });
   Net.on('disconnect', renderConn);
@@ -44,12 +45,28 @@ function clearPending() { if (P.room) store.del(pendingKey(P.room)); P.pending =
 async function recheckPending() {
   const r = await Net.call('p:pending', { room: P.room, reqId: P.pending });
   if (r && r.creds) { clearPending(); saveCreds(r.creds); P.creds = r.creds; hello(); }
-  else if (!r || r.error) { clearPending(); render(); }
+  else if (r && r.error) { clearPending(); render(); }
 }
 async function cancelPending() {
   await Net.call('p:cancel', { room: P.room, reqId: P.pending });
   clearPending(); render();
 }
+
+// forget this game on this phone (saved login and last code), back to the code screen
+function forgetRoom() {
+  if (P.room) { store.del(credsKey(P.room)); store.del(pendingKey(P.room)); }
+  store.del(skey('lastRoom'));
+  P.room = null; P.creds = null; P.state = null; P.pending = false; P.replaced = false; P.ended = false;
+  setTeamColour(null);
+  history.replaceState(null, '', '/' + (AS ? '?as=' + AS : ''));
+}
+async function leaveGame(ask) {
+  if (ask && !confirm(ask)) return;
+  if (P.creds) Net.call('p:leave', null, 3000);
+  forgetRoom(); render();
+}
+const leaveBtn = (text = 'Leave this game', ask = null) => h('button.link', { onclick: () => leaveGame(ask), text });
+const LEAVE_ASK = 'Leave this game? You can join again with the code, but your team will be one short until you do.';
 
 async function hello() {
   const r = await Net.call('p:hello', P.creds);
@@ -97,7 +114,8 @@ function gameApi() {
 function render() {
   const root = app();
   const st = P.state;
-  if (P.replaced) return show('replaced', () => screen('', [h('h1', { text: 'You are playing on another phone now.' }), h('p.sub', { text: 'This phone has been handed over by the host.' })]));
+  if (P.ended) return show('ended', () => screen('', [h('h1', { text: 'This game has ended.' }), h('p.sub', { text: 'Thanks for playing!' }), h('button.btn.main', { onclick: () => { P.ended = false; render(); }, text: 'Join another game' })]));
+  if (P.replaced) return show('replaced', () => screen('', [h('h1', { text: 'You are playing on another phone now.' }), h('p.sub', { text: 'This phone has been handed over by the host.' }), leaveBtn('Join a different game')]));
   if (P.pending) return show('pending', () => screen('', [h('h1', { text: 'Asking the host…' }),
     h('p.sub', { text: 'Someone with your name is already playing. The host will check it is you on a new phone.' }),
     h('button.link', { onclick: cancelPending, text: 'Cancel' })]));
@@ -105,7 +123,7 @@ function render() {
   if (!P.creds) return show('join:' + P.room, joinScreen);
   if (!st) return show('loading', () => screen('', [h('p.sub', { text: 'Connecting…' })]));
   const me = st.me;
-  if (st.phase === 'removed') return show('removed', () => screen('', [h('h1', { text: 'The host has taken you out of this game.' }), h('p.sub', { text: 'Ask them if that was a mistake.' })]));
+  if (st.phase === 'removed') return show('removed', () => screen('', [h('h1', { text: 'The host has taken you out of this game.' }), h('p.sub', { text: 'Ask them if that was a mistake: they can bring you back.' }), leaveBtn('Join a different game')]));
 
   if (!me.team || me.waiting) return show('queue:' + (me.team || '') + me.waiting + st.locked, () => queueScreen(st));
 
@@ -119,7 +137,7 @@ function render() {
     case 'time': return show('time:' + (st.last ? st.last.label : ''), () => screen('big-word', [h('div.huge', { text: 'Time!' })]));
     case 'results': return show('res:' + JSON.stringify([st.last, st.teamTotal, st.next]), () => betweenScreen(st));
     case 'gameover': return show('go:' + JSON.stringify(st.gameover), () => gameoverScreen(st));
-    case 'dsi': return show('dsi:' + JSON.stringify(st.dsi), () => dsiScreen(st));
+    case 'dsi': return show('offline-break', () => screen('', [h('p.big', { text: 'Waiting for host' })]));
     case 'final': return show('final', () => finalScreen(st));
     default: return show('?' + st.phase, () => screen('', [h('p.sub', { text: 'Waiting for the host' })]));
   }
@@ -160,7 +178,8 @@ function codeScreen() {
     Sound.ensure();
     const code = input.value.trim().toUpperCase();
     const r = await Net.call('room:exists', code);
-    if (!r || !r.ok) { err.textContent = 'No game with that code. Check with the host.'; return; }
+    if (!r) { err.textContent = 'Cannot reach the server. Check your internet and try again.'; return; }
+    if (!r.ok) { err.textContent = 'No game with that code. Check with the host.'; return; }
     P.room = code; store.set(skey('lastRoom'), code); P.creds = store.get(credsKey(code)); render();
     if (P.creds) hello();
   };
@@ -208,9 +227,9 @@ function queueScreen(st) {
     return screen('join', [h('h1', { text: `Hi ${st.me.name}` }), h('p.sub', { text: 'Pick a team.' }),
       h('div.team-pick', null,
         h('button.btn.team-btn.red', { onclick: () => Net.call('p:team', { team: 'red' }), text: 'Red' }),
-        h('button.btn.team-btn.blue', { onclick: () => Net.call('p:team', { team: 'blue' }), text: 'Blue' }))]);
+        h('button.btn.team-btn.blue', { onclick: () => Net.call('p:team', { team: 'blue' }), text: 'Blue' })), leaveBtn()]);
   }
-  return screen('', [h('h1', { text: `Hi ${st.me.name}` }), h('p.big', { text: 'Waiting for host' }), h('p.sub', { text: 'Teams are already locked. The host will put you in a team, and you play from the next round.' })]);
+  return screen('', [h('h1', { text: `Hi ${st.me.name}` }), h('p.big', { text: 'Waiting for host' }), h('p.sub', { text: 'Teams are already locked. The host will put you in a team, and you play from the next round.' }), leaveBtn('Leave this game', LEAVE_ASK)]);
 }
 
 function waitingScreen(st) {
@@ -222,6 +241,7 @@ function waitingScreen(st) {
     me.seat ? h('p.sub', { text: 'Remember your number.' }) : null,
     h('p.big', { text: 'Waiting for host' }),
     !st.locked ? h('button.btn.ghost', { onclick: () => Net.call('p:team', { team: other(me.team) }), text: `Switch to ${TEAM_NAME[other(me.team)]}` }) : null,
+    leaveBtn('Leave this game', st.locked ? LEAVE_ASK : null),
   ]);
 }
 
@@ -313,18 +333,6 @@ function gameoverScreen(st) {
   ]);
 }
 
-function dsiScreen(st) {
-  const d = st.dsi;
-  const t = d.turn;
-  return screen('dsi', [
-    h('p.kicker', { text: "Don't Say It" }),
-    h('p.rule', { text: 'Describe the word without saying the word or the banned words. The other team is watching you.' }),
-    h('div.champ', null, h('span.c-red', { text: `Red ${d.points.red}` }), h('span.dot', { text: '·' }), h('span.c-blue', { text: `Blue ${d.points.blue}` })),
-    t && !t.over ? h('p.big', { text: `${TEAM_NAME[t.team]} is describing` }) : h('p.big', { text: 'Next turn coming up' }),
-    t && !t.over ? h('div.timer-big', { 'data-ends': t.endsAt }) : null,
-  ]);
-}
-
 function finalScreen(st) {
   const f = st.final;
   const t = st.me.team;
@@ -335,13 +343,13 @@ function finalScreen(st) {
   if (f.byTiebreak) kids.push(h('p.sub', { text: 'Level on points: decided by the faster Maths Chain time.' }));
   const list = h('ul.final-list');
   for (const g of f.games) list.append(h('li', null, h('b', { text: g.name }), ' ', g.winner ? `${TEAM_NAME[g.winner]} won` : 'a draw'));
-  if (f.dsi) list.append(h('li', null, h('b', { text: "Don't Say It" }), ' ', f.dsi.winner ? `${TEAM_NAME[f.dsi.winner]} won (Red ${f.dsi.points.red}, Blue ${f.dsi.points.blue})` : 'a draw'));
   kids.push(list);
   const mine = f.mvps.filter(m => m.team === t);
   if (mine.length) {
     kids.push(h('p.kicker', { text: `${TEAM_NAME[t]} stars` }));
     kids.push(h('ul.final-list', null, mine.map(m => h('li', null, h('b', { text: m.label }), ` ${m.name} (${m.value})`))));
   }
+  kids.push(leaveBtn('Leave this game'));
   return screen('final', kids);
 }
 

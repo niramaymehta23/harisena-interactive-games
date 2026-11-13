@@ -103,13 +103,18 @@ async function answer(p, value) {
 }
 export async function playMaths({ phones, room, sleep, until, shot }) {
   const teams = await Promise.all(phones.map(p => p.evaluate(() => document.body.dataset.team)));
+  const segId = room().current.seg.segId;
+  const finishedResult = team => {
+    const seg = room().segments.find(s => s.segId === segId);
+    return seg && seg.stats[team].steps === seg.stats[team].chainLength;
+  };
   const heard = { red: null, blue: null };
   let wrongDone = false, shots = 0;
   for (const team of ['red', 'blue']) {
     const idx = phones.map((p, i) => i).filter(i => teams[i] === team);
     for (let guard = 0; guard < 40; guard++) {
       const done = await Promise.all(idx.map(i => phones[i].locator('.mc-celebrate').count()));
-      if (done.some(n => n > 0)) break;
+      if (done.some(n => n > 0) || finishedResult(team)) break;
       let turn = -1;
       for (const i of idx) if (await phones[i].locator('.keypad').isVisible().catch(() => false)) { turn = i; break; }
       if (turn < 0) { await sleep(150); continue; }
@@ -130,13 +135,15 @@ export async function playMaths({ phones, room, sleep, until, shot }) {
         await sleep(3200); // (answer() also waits until the keypad unlocks)
       }
       await answer(p, v);
-      await until(() => p.locator('.mc-answer').count().then(n => n > 0), 4000, 'done screen with the answer');
-      heard[team] = Number((await p.locator('.mc-answer').first().innerText()).trim());
+      await until(async () => finishedResult(team) || await p.locator('.mc-answer').count() > 0, 4000, 'done screen with the answer');
+      if (!finishedResult(team)) heard[team] = Number((await p.locator('.mc-answer').first().innerText()).trim());
       if (shots === 1) await shot(p, 'maths-3-done');
       const waiting = idx.find(i => i !== turn);
       if (waiting != null && shots === 1) await shot(phones[waiting], 'maths-4-other');
     }
-    await until(async () => (await Promise.all(idx.map(i => phones[i].locator('.mc-celebrate').count()))).some(n => n > 0), 5000, `${team} finished`);
+    // Once both teams finish, the server moves directly to Time/results. With 30
+    // pages the celebration can disappear before the browser checks every phone.
+    await until(async () => finishedResult(team) || (await Promise.all(idx.map(i => phones[i].locator('.mc-celebrate').count()))).some(n => n > 0), 5000, `${team} finished`);
     await shot(phones[idx[0]], `maths-5-finished-${team}`);
   }
   return true;

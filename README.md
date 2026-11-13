@@ -1,8 +1,8 @@
 # Harisena Sabha Games
 
 Phone party games for two teams (Red and Blue, 10–15 players each) run from one host phone:
-**Pair Hunt**, **Shout It Out** and **Maths Chain** feed an automatic championship; **Don't Say It**
-is played with cards and scored on the host's counter. The full spec is in the session upload
+**Pair Hunt**, **Shout It Out** and **Maths Chain** feed an automatic championship. Optional word games
+such as Don't Say It are played offline, using a separate word list and score. The original spec is in the session upload
 ("Harisena Sabha Games — Full Game Spec"); choices made where the spec was open are in
 [DECISIONS.md](DECISIONS.md).
 
@@ -26,6 +26,14 @@ npm start                 # http://localhost:3100  (host page: /host)
 
 Environment variables: `PORT` (default 3100), `DATA_DIR` (default `data/`, where each room is
 saved as JSON at the end of every round), `NO_SAVE=1` (keep nothing on disk).
+
+## Host round controls
+
+Choose **Rounds** (1–20) beside each game before starting. Between rounds, change **Planned rounds**
+or use **Finish game and keep scores**. **Add another round** continues a completed game with its old
+scores intact, including after another game has been played. **Replay last round** replaces that round;
+**Restart game** clears that game's old scores. Shout's practice is separate, and each turn-based scored
+round includes a Red turn and a Blue turn. Plans and preferences survive a server restart.
 
 ## Putting it online
 

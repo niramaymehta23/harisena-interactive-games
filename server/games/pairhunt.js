@@ -38,7 +38,7 @@ function symbolSet(lookalike, maxPlayers, r) {
 }
 
 function create(ctx) {
-  const lookalike = ctx.n === 2;
+  const lookalike = ctx.n >= 2;
   const maxPlayers = Math.max(ctx.teams.red.length, ctx.teams.blue.length);
   const allowed = symbolSet(lookalike, maxPlayers, ctx.rng('lookalike'));
   const T = {};

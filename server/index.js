@@ -130,6 +130,24 @@ function wire(socket) {
     ack(cb)({ ok: true });
     socket.emit('state', room.hostState());
   });
+  // another phone takes over as host with the room PIN (the first host's phone died or was swapped)
+  socket.on('host:takeover', ({ room: code, pin } = {}, cb) => {
+    const room = roomOf(code);
+    if (!room) return ack(cb)({ error: 'No game with that code.' });
+    const r = room.takeover(pin);
+    ack(cb)(r.error ? r : { room: room.code, hostToken: r.hostToken });
+  });
+  // the host ends the session for everyone: phones are told, the room and its save file go
+  socket.on('host:end', async (_, cb) => {
+    const room = socket.data.host && rooms.get(socket.data.host);
+    if (!room) return ack(cb)({ error: 'Not the host.' });
+    room.end();
+    rooms.delete(room.code);
+    if (SAVE) fs.rm(path.join(DATA_DIR, room.code + '.json'), { force: true }, () => {});
+    io.to([`r:${room.code}`, `h:${room.code}`]).emit('ended');
+    io.in([`r:${room.code}`, `h:${room.code}`]).socketsLeave([`r:${room.code}`, `h:${room.code}`]);
+    ack(cb)({ ok: true });
+  });
   socket.on('host:cmd', (c, cb) => {
     const room = socket.data.host && rooms.get(socket.data.host);
     if (!room) return ack(cb)({ error: 'Not the host.' });
@@ -180,6 +198,12 @@ function wire(socket) {
   });
   const mine = () => { const room = socket.data.room && rooms.get(socket.data.room); return room && socket.data.pid ? room : null; };
   socket.on('p:team', ({ team } = {}, cb) => { const room = mine(); ack(cb)(room ? room.pickTeam(socket.data.pid, team) : { error: 'Not joined.' }); });
+  socket.on('p:leave', (_, cb) => {
+    const room = mine();
+    if (room) { room.leave(socket.data.pid); socket.leave(`p:${room.code}:${socket.data.pid}`); socket.leave(`r:${room.code}`); }
+    socket.data.pid = null; socket.data.room = null;
+    ack(cb)({ ok: true });
+  });
   socket.on('hb', () => { const room = mine(); if (room) { room.heartbeat(socket.data.pid); } });
   socket.on('act', (a) => { const room = mine(); if (room) room.action(socket.data.pid, a); });
 }

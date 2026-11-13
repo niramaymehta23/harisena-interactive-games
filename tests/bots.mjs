@@ -5,10 +5,11 @@
 //
 //   node tests/bots.mjs            (SPEED=20 node tests/bots.mjs for a quicker run)
 import { createRequire } from 'module';
+import { writeFileSync } from 'node:fs';
 import { io as connect } from 'socket.io-client';
 const require = createRequire(import.meta.url);
 
-process.env.SABHA_SPEED = process.env.SPEED || process.env.SABHA_SPEED || '10';
+process.env.SABHA_SPEED = process.env.TEST_URL ? '1' : process.env.SPEED || process.env.SABHA_SPEED || '10';
 process.env.NO_SAVE = '1';
 const SPEED = Number(process.env.SABHA_SPEED);
 const { start, rooms } = require('../server/index.js');
@@ -23,9 +24,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const log = (...a) => console.log(`[${((Date.now() - T0) / 1000).toFixed(1)}s]`, ...a);
 const T0 = Date.now();
 
-const { server } = await start(0);
-const URL = `http://localhost:${server.address().port}`;
-const call = (s, ev, d) => new Promise(res => s.emit(ev, d, res));
+const { server } = process.env.TEST_URL ? { server: null } : await start(0);
+const URL = process.env.TEST_URL || `http://localhost:${server.address().port}`;
+const call = (s, ev, d) => new Promise((res, reject) => s.timeout(15000).emit(ev, d, (err, value) => err ? reject(err) : res(value)));
 const until = async (fn, ms = 60000, what = 'condition') => {
   const end = Date.now() + ms;
   while (Date.now() < end) { if (fn()) return; await sleep(50); }
@@ -147,6 +148,14 @@ await until(() => newPhone.state && newPhone.state.me && newPhone.state.me.name 
 bots[2].s.disconnect(); bots[2] = newPhone;
 log('late joiner and handover ok');
 
+// Keep the requested 15 vs 15 during gameplay, after exercising the late-join flow.
+if (process.env.EXACT_TEAMS === '1') {
+  await cmd({ cmd: 'remove', pid: late.creds.playerId });
+  bots.pop(); late.s.disconnect();
+  await until(() => hs.counts.red === 15 && hs.counts.blue === 15, 5000, 'exact 15 vs 15');
+  log('exact teams: Red 15, Blue 15; one host');
+}
+
 async function playRound(label) {
   for (const k in boards) delete boards[k];
   await cmd({ cmd: 'start' });
@@ -155,11 +164,18 @@ async function playRound(label) {
   // chaos: three phones drop for 15 s of real time (they go offline and come back)
   const victims = [bots[4], bots[20], bots[9]];
   const chaos = Promise.all(victims.map((b, k) => sleep(300 + k * 500).then(() => b.drop(12000 + k * 1500))));
+  // Hosted smoke tests sample actual live play, then use the host's end-round
+  // control rather than waiting through every full 3-4 minute timer.
+  let cap;
+  if (process.env.TEST_URL) cap = setTimeout(() => {
+    if (hs.phase === 'live') cmd({ cmd: 'endRound' }).catch(e => errors.push(e.message));
+  }, hs.game.id === 'maths' ? 35000 : 20000);
   // one pause in the middle of the first round of each game
   if (label.endsWith('#1')) { await sleep(1000); await cmd({ cmd: 'pause' }); await sleep(1500); await cmd({ cmd: 'resume' }); }
   await until(() => ['time', 'results', 'gameover'].includes(hs.phase), 400000 / SPEED + 60000, `end of ${label}`);
   await chaos;
   await until(() => ['results', 'gameover'].includes(hs.phase), 20000, 'results');
+  clearTimeout(cap);
   const seg = hs.results[hs.results.length - 1];
   log(`${label} ${segId}: raw R${seg.raw.red ?? '-'} B${seg.raw.blue ?? '-'} → score R${seg.score.red ?? '-'} B${seg.score.blue ?? '-'} | ${Object.values(seg.lines).join(' / ')}`);
 }
@@ -185,10 +201,11 @@ await cmd({ cmd: 'dsiStart', team: 'red' });
 for (const [team, d] of [['red', 1], ['red', 1], ['blue', -1], ['blue', 1]]) await cmd({ cmd: 'dsiPoint', team, delta: d });
 await cmd({ cmd: 'adjust', team: 'blue', points: 3, reason: 'bot test adjustment' });
 await cmd({ cmd: 'final' });
-await until(() => bots.every(b => b.state && b.state.phase === 'final'), 10000, 'every phone on the final screen');
+await until(() => hs?.phase === 'final' && bots.every(b => b.state && b.state.phase === 'final'), 10000, 'host and every phone on the final screen');
 
 // ---------- checks ----------
-const room = rooms.get(CODE);
+const audit = process.env.TEST_URL ? await call(host, 'host:audit', null) : null;
+const room = audit ? { ...audit, games: {}, warnings: hs.warnings, final: hs.final } : rooms.get(CODE);
 const problems = [];
 for (const s of room.segments) {
   for (const t of s.teams) {
@@ -215,6 +232,13 @@ log('MVPs:', room.final.mvps.map(m => `${m.team} ${m.label}: ${m.name} ${m.value
 clearInterval(hbTimer); clearInterval(stepTimer);
 host.disconnect(); bots.forEach(b => b.s.disconnect());
 const fail = [...problems, ...gameErrors, ...errors];
+if (process.env.TEST_REPORT) writeFileSync(process.env.TEST_REPORT, JSON.stringify({
+  status: fail.length ? 'failed' : 'passed', url: URL, room: CODE,
+  host: 1, red: 15, blue: process.env.EXACT_TEAMS === '1' ? 15 : 16,
+  elapsedSeconds: Math.round((Date.now() - T0) / 1000), sampledRounds: !!process.env.TEST_URL,
+  actions: totalActs, duplicateActions: bots.reduce((a, b) => a + b.dup, 0),
+  eventCount: room.events.length, rounds: room.segments, final: room.final, errors: fail,
+}, null, 2));
 if (fail.length) { origError('BOT TEST FAILED:\n' + fail.slice(0, 30).join('\n')); process.exit(1); }
 console.log('bot test passed');
 process.exit(0);
